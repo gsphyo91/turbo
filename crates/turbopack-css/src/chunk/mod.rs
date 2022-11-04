@@ -1,6 +1,8 @@
 pub(crate) mod optimize;
 mod writer;
 
+use std::fmt::Write;
+
 use anyhow::{anyhow, Result};
 use indexmap::IndexSet;
 use turbo_tasks::{primitives::StringVc, TryJoinIterExt, ValueToString, ValueToStringVc};
@@ -207,15 +209,29 @@ impl Asset for CssChunk {
 
         let path = self_vc.path();
         let chunk_name = path.to_string();
-        let mut code = format!("/* chunk {} */\n", chunk_name.await?);
 
-        let mut writer = WriterWithIndent::new(&mut code);
+        let mut body = "".to_owned();
+        let mut writer = WriterWithIndent::new(&mut body);
+        let mut external_imports = IndexSet::new();
         for entry in this.main_entries.await?.iter() {
             let entry_placeable = CssChunkPlaceableVc::cast_from(entry);
             let entry_content = entry_placeable.as_chunk_item(this.context).content();
 
-            expand_imports(&mut writer, entry_content).await?;
+            for external_import in expand_imports(&mut writer, entry_content).await? {
+                external_imports.insert(external_import.await?.to_owned());
+            }
         }
+
+        let mut code = format!("/* chunk {} */\n", chunk_name.await?);
+        for external_import in external_imports {
+            writeln!(
+                code,
+                "@import \"{}\";",
+                external_import.replace('"', "\\\"")
+            )?;
+        }
+
+        code += &body;
 
         Ok(File::from(code).into())
     }
@@ -264,10 +280,17 @@ pub trait CssChunkPlaceable: Asset {
 #[turbo_tasks::value(transparent)]
 pub struct CssChunkPlaceables(Vec<CssChunkPlaceableVc>);
 
+#[derive(Clone)]
+#[turbo_tasks::value(shared)]
+pub enum CssImport {
+    External(StringVc),
+    Internal(ImportAssetReferenceVc, CssChunkItemVc),
+}
+
 #[turbo_tasks::value(shared)]
 pub struct CssChunkItemContent {
     pub inner_code: String,
-    pub imports: Vec<(ImportAssetReferenceVc, CssChunkItemVc)>,
+    pub imports: Vec<CssImport>,
 }
 
 #[turbo_tasks::value_trait]
